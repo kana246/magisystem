@@ -99,12 +99,25 @@ if 'request_cache' not in st.session_state:
     st.session_state.request_cache = {}
 if 'cache_expiry' not in st.session_state:
     st.session_state.cache_expiry = 300  # 5分
+if 'request_count' not in st.session_state:
+    st.session_state.request_count = 0
+if 'last_request_time' not in st.session_state:
+    st.session_state.last_request_time = None
 
 # Gemini APIの設定
 @st.cache_resource
 def initialize_gemini():
     """Gemini APIを初期化"""
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    # Streamlit Secretsから取得を試みる
+    api_key = None
+    try:
+        api_key = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
+    except:
+        pass
+    
+    # 環境変数からも取得を試みる
+    if not api_key:
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     
     if not api_key:
         return None, [], "API Key not configured"
@@ -146,8 +159,8 @@ def get_cache_key(proposal_text, magi_type):
     """キャッシュキーを生成"""
     return f"{magi_type}:{hash(proposal_text)}"
 
-def analyze_proposal(proposal_text, magi_type):
-    """Gemini APIを使って提案を分析"""
+def analyze_proposal(proposal_text, magi_type, max_retries=3):
+    """Gemini APIを使って提案を分析（リトライ機能付き）"""
     
     MAGI_COLOR = "#FF6600"
     
@@ -217,76 +230,85 @@ JSON以外の文字は含めないでください。"""
         if current_time - timestamp < st.session_state.cache_expiry:
             return cached_data
 
-    # ランダム遅延
-    delay = random.uniform(0.5, 1.5)
+    # ランダム遅延（より長く）
+    delay = random.uniform(2.0, 4.0)
     time.sleep(delay)
 
-    try:
-        model = genai.GenerativeModel(MODEL_NAME)
-        full_prompt = f"{persona['prompt']}\n\n提案内容: {proposal_text}"
-        
-        response = model.generate_content(
-            full_prompt,
-            generation_config=genai.types.GenerationConfig(
-                max_output_tokens=150,
-                temperature=0.7,
-            ),
-            safety_settings={
-                'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
-                'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
-                'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
-                'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
-            }
-        )
-        
-        response_text = response.text.strip()
-        
-        # JSONを抽出
-        if "```json" in response_text:
-            json_str = response_text.split("```json")[1].split("```")[0].strip()
-        elif "```" in response_text:
-            json_str = response_text.split("```")[1].split("```")[0].strip()
-        elif "{" in response_text and "}" in response_text:
-            start = response_text.find("{")
-            end = response_text.rfind("}") + 1
-            json_str = response_text[start:end]
-        else:
-            json_str = response_text
+    # リトライロジック
+    for attempt in range(max_retries):
+        try:
+            model = genai.GenerativeModel(MODEL_NAME)
+            full_prompt = f"{persona['prompt']}\n\n提案内容: {proposal_text}"
             
-        result = json.loads(json_str)
-        result["magi"] = persona["name"]
-        result["icon"] = persona["icon"]
-        result["color"] = persona["color"]
-        result["role"] = persona["role"]
-        
-        # キャッシュに保存
-        st.session_state.request_cache[cache_key] = (result, current_time)
-        
-        return result
-        
-    except Exception as e:
-        error_msg = str(e)
-        
-        if '429' in error_msg or 'quota' in error_msg.lower() or 'RESOURCE_EXHAUSTED' in error_msg:
+            response = model.generate_content(
+                full_prompt,
+                generation_config=genai.types.GenerationConfig(
+                    max_output_tokens=100,  # さらに削減
+                    temperature=0.7,
+                ),
+                safety_settings={
+                    'HARM_CATEGORY_HARASSMENT': 'BLOCK_NONE',
+                    'HARM_CATEGORY_HATE_SPEECH': 'BLOCK_NONE',
+                    'HARM_CATEGORY_SEXUALLY_EXPLICIT': 'BLOCK_NONE',
+                    'HARM_CATEGORY_DANGEROUS_CONTENT': 'BLOCK_NONE',
+                }
+            )
+            
+            response_text = response.text.strip()
+            
+            # JSONを抽出
+            if "```json" in response_text:
+                json_str = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                json_str = response_text.split("```")[1].split("```")[0].strip()
+            elif "{" in response_text and "}" in response_text:
+                start = response_text.find("{")
+                end = response_text.rfind("}") + 1
+                json_str = response_text[start:end]
+            else:
+                json_str = response_text
+                
+            result = json.loads(json_str)
+            result["magi"] = persona["name"]
+            result["icon"] = persona["icon"]
+            result["color"] = persona["color"]
+            result["role"] = persona["role"]
+            
+            # キャッシュに保存
+            st.session_state.request_cache[cache_key] = (result, current_time)
+            
+            return result
+            
+        except Exception as e:
+            error_msg = str(e)
+            
+            # 429エラーの場合、待機時間を増やしてリトライ
+            if '429' in error_msg or 'quota' in error_msg.lower() or 'RESOURCE_EXHAUSTED' in error_msg:
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt) * 3  # エクスポネンシャルバックオフ: 3秒, 6秒, 12秒
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    return {
+                        "magi": persona["name"],
+                        "decision": False,
+                        "reason": "ERROR: 429 QUOTA EXCEEDED. PLEASE WAIT A FEW MINUTES OR GET A NEW KEY",
+                        "score": 0,
+                        "icon": persona["icon"],
+                        "color": persona["color"],
+                        "role": persona["role"]
+                    }
+            
+            # その他のエラー
             return {
                 "magi": persona["name"],
                 "decision": False,
-                "reason": "ERROR: 429 QUOTA EXCEEDED. VISIT: https://aistudio.google.com/apikey FOR NEW KEY",
+                "reason": f"ERROR: {str(e)[:50]}",
                 "score": 0,
                 "icon": persona["icon"],
                 "color": persona["color"],
                 "role": persona["role"]
             }
-        
-        return {
-            "magi": persona["name"],
-            "decision": False,
-            "reason": f"ERROR: {str(e)[:50]}",
-            "score": 0,
-            "icon": persona["icon"],
-            "color": persona["color"],
-            "role": persona["role"]
-        }
 
 def create_result_html(results, final_decision, approvals):
     """結果表示HTML"""
@@ -413,6 +435,23 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+# API Key設定状況の表示
+if not api_key:
+    st.error("""
+    ⚠️ **API KEY NOT CONFIGURED**
+    
+    Please set your Gemini API Key in Streamlit Cloud Secrets:
+    1. Click 'Manage app' (bottom right)
+    2. Go to Settings → Secrets
+    3. Add: `GEMINI_API_KEY = "your_key_here"`
+    4. Get your key from: https://aistudio.google.com/apikey
+    """)
+    st.stop()
+elif not isinstance(MODEL_NAME, str):
+    st.warning(f"⚠️ Model initialization issue: {MODEL_NAME}")
+else:
+    st.success(f"✅ API configured | Model: {MODEL_NAME}")
+
 # 入力エリア
 proposal_text = st.text_area(
     "[ PROPOSAL INPUT ]",
@@ -426,14 +465,26 @@ if st.button("EXECUTE ANALYSIS [ENTER]", key="analyze_btn"):
     if not proposal_text or len(proposal_text.strip()) == 0:
         st.error("ERROR: PROPOSAL INPUT REQUIRED.")
     else:
-        with st.spinner("ANALYZING... PLEASE WAIT..."):
+        # レート制限チェック
+        current_time = time.time()
+        if st.session_state.last_request_time:
+            time_since_last = current_time - st.session_state.last_request_time
+            if time_since_last < 30:  # 30秒以内の連続実行を警告
+                st.warning(f"⚠️ Please wait {30 - int(time_since_last)} seconds to avoid rate limits...")
+                time.sleep(max(0, 30 - time_since_last))
+        
+        with st.spinner("ANALYZING... PLEASE WAIT... (This may take 20-30 seconds)"):
+            # リクエストカウント増加
+            st.session_state.request_count += 3
+            st.session_state.last_request_time = time.time()
+            
             # 3つのMAGIで分析
             results = {}
             progress_bar = st.progress(0)
             
             for idx, magi_type in enumerate(["casper", "balthasar", "melchior"]):
                 results[magi_type] = analyze_proposal(proposal_text, magi_type)
-                time.sleep(0.5)
+                time.sleep(2.0)  # 各リクエスト間に2秒待機
                 progress_bar.progress((idx + 1) / 3)
             
             progress_bar.empty()
@@ -449,6 +500,9 @@ if st.button("EXECUTE ANALYSIS [ENTER]", key="analyze_btn"):
             
             # 結果表示
             st.markdown(create_result_html(results, final_decision, approvals), unsafe_allow_html=True)
+            
+            # 使用状況を表示
+            st.info(f"📊 API Requests this session: {st.session_state.request_count} | Cached: {len(st.session_state.request_cache)}")
 
 # フッター
 st.markdown(f"""
