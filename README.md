@@ -1,0 +1,2 @@
+# magisystem
+アニメevaに出てくるmagisystemをなんちゃってで作りました
