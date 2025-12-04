@@ -535,7 +535,7 @@ if st.button("EXECUTE ANALYSIS [ENTER]", key="analyze_btn"):
 st.markdown(f"""
 <div style="margin-top: 30px; padding: 10px; background: #000000; border: 1px solid #FF6600; font-family: 'Courier New', monospace;">
     <p style="color: #FF6600; font-size: 12px; margin: 0; text-align: left;">
-        > SYSTEM_MODEL: {MODEL_NAME if isinstance(MODEL_NAME, str) else 'NOT_CONFIGURED'} | ACCESS_LEVEL: SUPERUSER | CACHE: ENABLED
+        > SYSTEM_MODEL: {MODEL_NAME if isinstance(MODEL_NAME, str) else 'NOT_CONFIGURED'} | API_KEYS: {len(api_keys) if api_keys else 0} | CACHE: ENABLED
     </p>
 </div>
 """, unsafe_allow_html=True)
