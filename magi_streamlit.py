@@ -463,7 +463,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # API Key設定状況の表示
-if not api_key:
+if not api_keys:
     st.error("""
     ⚠️ **API KEY NOT CONFIGURED**
     
@@ -477,7 +477,21 @@ if not api_key:
 elif not isinstance(MODEL_NAME, str):
     st.warning(f"⚠️ Model initialization issue: {MODEL_NAME}")
 else:
-    st.success(f"✅ API configured | Model: {MODEL_NAME}")
+    col1, col2 = st.columns(2)
+    with col1:
+        st.success(f"✅ API configured | Model: {MODEL_NAME}")
+    with col2:
+        st.info(f"🔑 Keys available: {len(api_keys)}")
+    
+    # 無料枠の制限を警告
+    st.warning(f"""
+    ⚠️ **FREE TIER LIMITS** (Model: {MODEL_NAME})
+    - Gemini 2.5 Pro: 5 RPM, 25 RPD (only 8 analyses/day!)
+    - Gemini 2.5 Flash: 10 RPM, 250 RPD (83 analyses/day)
+    - Gemini 2.0 Flash: 15 RPM, 1500 RPD (500 analyses/day) ✅ BEST
+    
+    Each analysis = 3 requests. Use wisely!
+    """)
 
 # 入力エリア
 proposal_text = st.text_area(
@@ -500,7 +514,7 @@ if st.button("EXECUTE ANALYSIS [ENTER]", key="analyze_btn"):
                 st.warning(f"⚠️ Please wait {30 - int(time_since_last)} seconds to avoid rate limits...")
                 time.sleep(max(0, 30 - time_since_last))
         
-        with st.spinner("ANALYZING... PLEASE WAIT... (This may take 20-30 seconds)"):
+        with st.spinner("ANALYZING... PLEASE WAIT... (This may take 30-40 seconds)"):
             # リクエストカウント増加
             st.session_state.request_count += 3
             st.session_state.last_request_time = time.time()
