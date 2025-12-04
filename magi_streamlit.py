@@ -103,28 +103,36 @@ if 'request_count' not in st.session_state:
     st.session_state.request_count = 0
 if 'last_request_time' not in st.session_state:
     st.session_state.last_request_time = None
+if 'current_key_index' not in st.session_state:
+    st.session_state.current_key_index = 0
 
 # Gemini APIの設定
 @st.cache_resource
 def initialize_gemini():
-    """Gemini APIを初期化"""
+    """Gemini APIを初期化（複数キー対応）"""
     # Streamlit Secretsから取得を試みる
-    api_key = None
+    api_keys = []
     try:
-        api_key = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
+        key_str = st.secrets.get("GEMINI_API_KEY") or st.secrets.get("GOOGLE_API_KEY")
+        if key_str:
+            # カンマ区切りで複数キーをサポート
+            api_keys = [k.strip() for k in key_str.split(",") if k.strip()]
     except:
         pass
     
     # 環境変数からも取得を試みる
-    if not api_key:
-        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_keys:
+        key_str = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if key_str:
+            api_keys = [k.strip() for k in key_str.split(",") if k.strip()]
     
-    if not api_key:
-        return None, [], "API Key not configured"
+    if not api_keys:
+        return [], [], "API Key not configured"
     
     try:
-        os.environ["GOOGLE_API_KEY"] = api_key
-        genai.configure(api_key=api_key)
+        # 最初のキーで初期化
+        os.environ["GOOGLE_API_KEY"] = api_keys[0]
+        genai.configure(api_key=api_keys[0])
         
         available_models = [
             m.name for m in genai.list_models() 
@@ -132,8 +140,11 @@ def initialize_gemini():
         ]
         
         candidate_models = [
-            'gemini-2.0-flash-exp', 'gemini-2.5-flash', 
-            'gemini-flash-latest', 'gemini-pro-latest', 'gemini-pro'
+            'gemini-2.0-flash-exp',      # 15 RPM, 1500 RPD - 最優先
+            'gemini-flash-latest',        # 通常10-15 RPM
+            'gemini-2.5-flash',          # 10 RPM, 250 RPD
+            'gemini-pro-latest',
+            'gemini-pro'                  # 避ける（5 RPM, 25 RPDのみ）
         ]
         
         model_name = None
@@ -148,18 +159,33 @@ def initialize_gemini():
         elif not model_name:
             model_name = "gemini-2.0-flash-lite"
             
-        return api_key, available_models, model_name
+        return api_keys, available_models, model_name
     
     except Exception as e:
-        return None, [], f"Error: {str(e)}"
+        return api_keys, [], f"Error: {str(e)}"
 
-api_key, available_models, MODEL_NAME = initialize_gemini()
+api_keys, available_models, MODEL_NAME = initialize_gemini()
+
+def get_current_api_key():
+    """現在のAPI Keyを取得（ローテーション対応）"""
+    if not api_keys:
+        return None
+    return api_keys[st.session_state.current_key_index % len(api_keys)]
+
+def rotate_api_key():
+    """次のAPI Keyに切り替え"""
+    if len(api_keys) > 1:
+        st.session_state.current_key_index += 1
+        new_key = get_current_api_key()
+        genai.configure(api_key=new_key)
+        return True
+    return False
 
 def get_cache_key(proposal_text, magi_type):
     """キャッシュキーを生成"""
     return f"{magi_type}:{hash(proposal_text)}"
 
-def analyze_proposal(proposal_text, magi_type, max_retries=3):
+def analyze_proposal(proposal_text, magi_type, max_retries=1):  # 3→1に削減
     """Gemini APIを使って提案を分析（リトライ機能付き）"""
     
     MAGI_COLOR = "#FF6600"
@@ -210,7 +236,8 @@ JSON以外の文字は含めないでください。"""
     if not persona:
         return {"error": "Invalid MAGI type"}
     
-    if not MODEL_NAME or not api_key:
+    current_key = get_current_api_key()
+    if not MODEL_NAME or not current_key:
         return {
             "magi": persona["name"],
             "decision": False,
@@ -230,8 +257,8 @@ JSON以外の文字は含めないでください。"""
         if current_time - timestamp < st.session_state.cache_expiry:
             return cached_data
 
-    # ランダム遅延（より長く）
-    delay = random.uniform(2.0, 4.0)
+    # ランダム遅延（制限を避けるため長めに）
+    delay = random.uniform(5.0, 8.0)  # 2-4秒 → 5-8秒に変更
     time.sleep(delay)
 
     # リトライロジック
@@ -484,7 +511,7 @@ if st.button("EXECUTE ANALYSIS [ENTER]", key="analyze_btn"):
             
             for idx, magi_type in enumerate(["casper", "balthasar", "melchior"]):
                 results[magi_type] = analyze_proposal(proposal_text, magi_type)
-                time.sleep(2.0)  # 各リクエスト間に2秒待機
+                time.sleep(5.0)  # 2秒 → 5秒に変更
                 progress_bar.progress((idx + 1) / 3)
             
             progress_bar.empty()
